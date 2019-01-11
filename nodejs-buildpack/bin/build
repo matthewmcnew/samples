@@ -18,12 +18,6 @@ if compgen -G "$env_dir/*" > /dev/null; then
     done
 fi
 
-# If the app is vendored, treat the vendored modules as if cached.
-if [[ -e node_modules ]]; then
-    rm -rf "$layers_dir/node_modules"
-    mv node_modules "$layers_dir/"
-fi
-
 # If it doesn't exist locally, create a Node.js cache layer with
 # POSIX-style root for build (bin, lib, include, etc).
 # This makes Node.js available to subsequent buildpacks as well.
@@ -47,31 +41,52 @@ fi
 export PATH=$PATH:$layers_dir/nodejs/bin
 export LD_LIBRARY_PATH=${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}$layers_dir/nodejs/lib
 
-# TODO: (saves ~3s) generate ./package-lock.json if necessary and
-# TODO: compare to copy in cache and checksum in node_modules.toml
-
-# Update cached node modules
-if [[ -d $layers_dir/node_modules ]]; then
-    npm rebuild "--nodedir=$layers_dir/nodejs"
-else
-    mkdir "$layers_dir/node_modules"
-fi
-ln -snf "$layers_dir/node_modules" node_modules
-
-npm install --unsafe-perm --userconfig .npmrc --cache "$layers_dir/npm-cache"
-echo "cache = true" > "$layers_dir/npm-cache.toml"
-
-
 # Update remote node modules layer if necessary
-local_checksum=$(md5sum package-lock.json | cut -d' ' -f1)
-if [[ -f $layers_dir/node_modules.toml ]]; then
-    remote_checksum=$(cat "$layers_dir/node_modules.toml" | yj -t | jq -r .metadata.lock_checksum)
+if [[ -f package-lock.json ]]; then
+    local_checksum=$(md5sum package-lock.json | cut -d' ' -f1)
+else
+    local_checksum="no-local-checksum"
 fi
-if [[ $local_checksum != $remote_checksum ]] ; then
+
+if [[ -f $layers_dir/node_modules.toml ]]; then
+    cached_checksum=$(cat "$layers_dir/node_modules.toml" | yj -t | jq -r .metadata.lock_checksum)
+fi
+
+echo "local ${local_checksum} cached ${cached_checksum}"
+
+if [[ ${local_checksum} != ${cached_checksum} ]] ; then
+
+    # If the app is vendored, treat the vendored modules as if cached.
+    if [[ -e node_modules ]]; then
+        rm -rf "$layers_dir/node_modules"
+        mv node_modules "$layers_dir/"
+    fi
+
+    mkdir -p "$layers_dir/node_modules"
+    ln -snf "$layers_dir/node_modules" node_modules
+
+    echo "npm rebuild"
+    npm rebuild "--nodedir=$layers_dir/nodejs" --update-binary
+
+    echo "npm install"
+    npm install --unsafe-perm --userconfig .npmrc --cache "$layers_dir/npm-cache"
+    echo "cache = true" > "$layers_dir/npm-cache.toml"
+
+    if [[ ${local_checksum} == "no-local-checksum" ]] ; then
+        local_checksum=$(md5sum package-lock.json | cut -d' ' -f1)
+    fi
+
     echo "launch = true" > "$layers_dir/node_modules.toml"
-    echo "build = true" >> "$layers_dir/node_modules.toml"
     echo "cache = true" >> "$layers_dir/node_modules.toml"
     echo -e "[metadata]\n  lock_checksum = \"$local_checksum\"" >> "$layers_dir/node_modules.toml"
+else
+    # Remove vendored dependencies in favor of cached node modules
+    if [[ -e node_modules ]]; then
+        rm -rf node_modules
+    fi
+
+    ln -snf "$layers_dir/node_modules" node_modules
+    echo "Using cached node modules"
 fi
 
 # Set default start command
